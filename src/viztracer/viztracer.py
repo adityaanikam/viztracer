@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import warnings
+import weakref
 import zlib
 from typing import Any, Callable, Literal, Sequence, TextIO
 
@@ -28,9 +29,16 @@ from .vizevent import VizEvent
 from .vizplugin import VizPluginBase, VizPluginManager
 
 
+def _discard_gc_callback(callback: Callable[[str, dict[str, Any]], None]) -> None:
+    if callback in gc.callbacks:
+        gc.callbacks.remove(callback)
+
+
 # This is the interface of the package. Almost all user should use this
 # class for the functions
 class VizTracer(Tracer):
+    _gc_finalizer: weakref.finalize | None = None
+
     def __init__(
         self,
         tracer_entries: int = 1000000,
@@ -360,8 +368,6 @@ class VizTracer(Tracer):
 
             self._plugin_manager.event("pre-start")
             if not self.log_sparse:
-                if self.log_gc:
-                    gc.callbacks.append(self.add_garbage_collection)
                 self.enable = True
                 super().start()
 
@@ -372,8 +378,6 @@ class VizTracer(Tracer):
             if not self.log_sparse:
                 self.enable = False
                 super().stop(stop_option)
-                if self.add_garbage_collection in gc.callbacks:
-                    gc.callbacks.remove(self.add_garbage_collection)
             if self.torch_profile is not None:
                 self.torch_profile.__exit__(None, None, None)
             self._plugin_manager.event("post-stop")
@@ -669,8 +673,28 @@ class VizTracer(Tracer):
     def log_gc(self, log_gc: bool) -> None:
         if isinstance(log_gc, bool):
             self.__log_gc = log_gc
+            if log_gc:
+                if self._gc_finalizer is None or not self._gc_finalizer.alive:
+                    self.__register_gc_callback()
+            elif self._gc_finalizer is not None:
+                self._gc_finalizer()
         else:
             raise TypeError(f"log_gc needs to be True or False, not {log_gc}")
+
+    def __register_gc_callback(self) -> None:
+        # gc.callbacks lives as long as the interpreter, so it must not keep
+        # the tracer alive. The callback only has a weak reference to the tracer
+        # and is removed from gc.callbacks when log_gc is turned off or the
+        # tracer is freed.
+        method_ref = weakref.WeakMethod(self.add_garbage_collection)
+
+        def callback(phase: str, info: dict[str, Any]) -> None:
+            method = method_ref()
+            if method is not None:
+                method(phase, info)
+
+        gc.callbacks.append(callback)
+        self._gc_finalizer = weakref.finalize(self, _discard_gc_callback, callback)
 
     def add_garbage_collection(self, phase: str, info: dict[str, Any]) -> None:
         if self.enable:

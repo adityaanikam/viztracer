@@ -258,13 +258,42 @@ class TestTracerFeature(BaseTmpl):
         import gc
         import weakref
 
+        # tracers left over from other tests remove their callback when collected
+        gc.collect()
+        callback_num = len(gc.callbacks)
         tracer = VizTracer(log_gc=True, register_global=False)
-        tracer.start()
-        tracer.stop()
+        self.assertEqual(len(gc.callbacks), callback_num + 1)
         ref = weakref.ref(tracer)
         del tracer
         gc.collect()
         self.assertIsNone(ref())
+        self.assertEqual(len(gc.callbacks), callback_num)
+
+    def test_log_gc_register_once(self):
+        import gc
+
+        gc.collect()
+        callback_num = len(gc.callbacks)
+        tracer = VizTracer(register_global=False)
+        self.assertEqual(len(gc.callbacks), callback_num)
+        tracer.log_gc = True
+        tracer.log_gc = True
+        self.assertEqual(len(gc.callbacks), callback_num + 1)
+        tracer.log_gc = False
+        self.assertEqual(len(gc.callbacks), callback_num)
+        tracer.log_gc = True
+        self.assertEqual(len(gc.callbacks), callback_num + 1)
+
+    def test_log_gc_while_tracing(self):
+        import gc
+
+        tracer = VizTracer(register_global=False)
+        tracer.start()
+        tracer.log_gc = True
+        gc.collect()
+        tracer.stop()
+        tracer.parse()
+        self.assertEventNumber(tracer.data, 3)
 
     def test_min_duration(self):
         tracer = VizTracer(min_duration=100)
